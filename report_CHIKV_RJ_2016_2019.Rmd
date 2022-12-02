@@ -1,0 +1,349 @@
+---
+title: "DClusterem: Model-based Cluster Detection using INLA approach"
+author: "Lucas Monteiro Bianchi"
+output:
+  html_document:
+    highlight: pygments
+    keep_md: no
+    mathjax: local
+    number_sections: yes
+    self_contained: no
+    theme: cerulean
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+editor_options:
+  chunk_output_type: console
+fig_caption: yes
+fig_height: 7
+fig_width: 7
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Lendo dados e carregando pacotes
+
+Os números de notificações de chikungunya são referentes ao periodo de 01/01/2016 até 31/12/2019 para todos os municipios do estado do Rio de Janeiro. Os dados foram obtidos atráves da API do [Infodengue](https://info.dengue.mat.br/services/api). O número de casos foi obtido somando as semanas epidemicas de cada municipio e as 10 aps do Rio de Janeiro por ano. Para o calculo da incidência foi considerado como população sucetível os dados obtidos no [DataSUS](http://tabnet.datasus.gov.br/cgi/deftohtm.exe?ibge/cnv/poptrj.def) para os anos de 2015 a 2018, sendo esses utilizados para o calculo da incidência do ano consecutivo.
+
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+require(tidyverse)
+require(pals) #color palette
+require(ggspatial) #add north arrow and scale bar
+
+## Importing cases
+dados <- read.csv2("Data/CHIKV_RJ2016_2019.csv",h=T,sep=";") %>% 
+  arrange(se,municipio) %>% 
+  mutate(ano = substr(se,1,4),
+         #incidencia (casos/100mil hab.)
+         inc = round(case_when(
+           ano == 2016 ~ casos/x2015,
+           ano == 2017 ~ casos/x2016,
+           ano == 2018 ~ casos/x2017,
+           ano == 2019 ~ casos/x2018
+         )*10^5,0),
+         pop = case_when(
+           ano == 2016 ~ x2015,
+           ano == 2017 ~ x2016,
+           ano == 2018 ~ x2017,
+           ano == 2019 ~ x2018
+         ),
+         mun_geocode = as.character(mun_geocode)
+  ) %>% dplyr::select(-c(x2015:x2018)) %>% 
+  group_by(mun_geocode,ano) %>% 
+  summarise(
+    pop = as.numeric(unique(pop)),
+    casos = sum(casos),
+    inc = casos/pop*10^5,
+    loginc = log(inc)
+  )
+```
+
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+library(sf)
+RJ.map.sf.0 <- st_read("Shape/rj_municipios/33MUE250GC_SIR.shp") %>% 
+  mutate(mun_geocode = substr(as.character(CD_GEOCMU), start = 1, stop = 6))
+
+dados <- dados %>% 
+  left_join(RJ.map.sf.0, by = "mun_geocode") %>% 
+  dplyr::select(-c(CD_GEOCMU,geometry,NM_MUNICIP)) %>% 
+  data.frame()
+
+CODMUN.tbl <- tibble(mun_geocode = unique(dados$mun_geocode)) %>% rowid_to_column("Mun") 
+dados <- dados %>% left_join(CODMUN.tbl, by = "mun_geocode")
+```
+
+# Objetivo
+
+O objetivo desse documento é modelar a incidência de chikungunya para os 92 municipios do estado do Rio de Janeiro visando detectar a ocorrência de grupos (clusters espaciais) para cada ano.
+
+# Model-based with no covariates using INLA approach
+
+Algumas das minhas tentativas: 
+
+* Mudar a estrutura espacial de *bym* para *iid*
+
+* Mudar *casos* para *inc*, e *loginc*
+
+* Desconsiderar o offset no modelo
+
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+require(INLA)
+formula1.m <- casos ~ 0 + f(Mun, model = "bym", graph = "RJ.adj", constr = F)
+quantis <- c(0.025, .975, 0.25, 0.75)
+```
+
+## Year 2016
+```{r}
+mod1.m2016 <- inla(formula = formula1.m,             
+                   quantiles = quantis, 
+                   family = "poisson", 
+                   E = pop / 10^5, 
+                   data = subset(dados,ano==2016),
+                   control.predictor = list(compute = T),
+                   control.fixed = control.fixed(mean.intercept = 0, prec.intercept = 0))
+```
+
+```{r}
+#Incidence and its credible interval by city
+inc0.mun <- exp(mod1.m2016$summary.random$Mun[1:92, c(1,3:6) +1]) %>%
+  rowid_to_column(var = "Mun")
+
+RJ.map.sf_2016 <-  RJ.map.sf.0  %>% left_join(CODMUN.tbl, by = "mun_geocode")%>% 
+  left_join(inc0.mun, by = "Mun")
+```
+
+
+## Year 2017
+```{r}
+mod1.m2017 <- inla(formula = formula1.m,             
+                   quantiles = quantis, 
+                   family = "poisson", 
+                   E = pop / 10^5, 
+                   data = subset(dados,ano==2017),
+                   control.predictor = list(compute = T),
+                   control.fixed = control.fixed(mean.intercept = 0, prec.intercept = 0))
+```
+
+```{r}
+#Incidence and its credible interval by city
+inc0.mun <- exp(mod1.m2017$summary.random$Mun[1:92, c(1,3:6) +1]) %>%
+  rowid_to_column(var = "Mun")
+
+RJ.map.sf_2017 <-  RJ.map.sf.0  %>% left_join(CODMUN.tbl, by = "mun_geocode")%>% 
+  left_join(inc0.mun, by = "Mun")
+```
+
+
+## Year 2018
+```{r}
+mod1.m2018 <- inla(formula = formula1.m,             
+                   quantiles = quantis, 
+                   family = "poisson", 
+                   E = pop / 10^5, 
+                   data = subset(dados,ano==2018),
+                   control.predictor = list(compute = T),
+                   control.fixed = control.fixed(mean.intercept = 0, prec.intercept = 0))
+```
+
+
+```{r}
+#Incidence and its credible interval by city
+inc0.mun <- exp(mod1.m2018$summary.random$Mun[1:92, c(1,3:6) +1]) %>%
+  rowid_to_column(var = "Mun")
+
+RJ.map.sf_2018 <-  RJ.map.sf.0  %>% left_join(CODMUN.tbl, by = "mun_geocode")%>% 
+  left_join(inc0.mun, by = "Mun")
+```
+
+
+## Year 2019
+```{r}
+mod1.m2019 <- inla(formula = formula1.m,             
+                   quantiles = quantis, 
+                   family = "poisson", 
+                   E = pop / 10^5, 
+                   data = subset(dados,ano==2019),
+                   control.predictor = list(compute = T),
+                   control.fixed = control.fixed(mean.intercept = 0, prec.intercept = 0))
+```
+
+
+```{r}
+#Incidence and its credible interval by city
+inc0.mun <- exp(mod1.m2019$summary.random$Mun[1:92, c(1,3:6) +1]) %>%
+  rowid_to_column(var = "Mun")
+
+RJ.map.sf_2019 <-  RJ.map.sf.0  %>% left_join(CODMUN.tbl, by = "mun_geocode")%>% 
+  left_join(inc0.mun, by = "Mun")
+```
+
+
+# Spatial visualization
+
+```{r}
+#Combining info of each year into an single object
+RJ.map.sf <- rbind(RJ.map.sf_2016,RJ.map.sf_2017,RJ.map.sf_2018,RJ.map.sf_2019) %>% 
+  mutate(ano = sort(rep(2016:2019,nrow(CODMUN.tbl))),
+         IncidenciaCat = cut(mean, breaks = c(0, floor(as.vector(quantile(mean,probs = seq(0.1,0.9,0.1)))), Inf),
+                             labels = paste0(c("  0",seq(10,90,10)),"% --| ",seq(10,100,10),"%"))
+  )
+```
+
+
+```{r}
+#Getting descriptive stats of incidence
+stats <- RJ.map.sf %>% group_by(ano) %>% 
+  summarise("Max" = max(mean),"Min" = min(mean),
+            "Mean" = mean(mean), "Median" = median(mean),
+            "SD" = sd(mean), "CV" = SD/Mean*100) %>%
+  as.data.frame()
+stats
+```
+
+
+## Map
+```{r}
+ggplot(RJ.map.sf) +
+  geom_sf(aes(fill = IncidenciaCat)) +
+  theme_bw() + 
+  theme(plot.title = element_text(size = 14,face = "bold"),
+        text = element_text(size = 12),
+        axis.title = element_text(face="bold"),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        panel.grid.minor = element_blank(),
+        legend.title = element_text(face = "bold",size = 12),
+        legend.text = element_text(size = 12),
+        legend.justification = "top",
+        strip.text.x = element_text(face = "bold", size = 14)
+  ) +
+  scale_fill_manual(values = brewer.ylorrd(10),
+                    guide = guide_legend(title = "Incidence",reverse = TRUE)) +
+  annotation_scale(location = "br", width_hint = 0.2) +
+  annotation_north_arrow(location = "br", which_north = "true", 
+                         pad_x = unit(0.4, "in"), pad_y = unit(0.25, "in"),
+                         style = north_arrow_fancy_orienteering) +
+  geom_label(
+    data    = stats,label.size = 1,show.legend = F,
+    mapping = aes(x = -45, y = -22.9, hjust = -0.1, vjust = -1,  
+                  label = paste0("Incidence (per 100k habs.)    ",
+                                 "\n    Min: ",sprintf(Min, fmt = '%#.2f'),
+                                 "\n    Max: ",sprintf(Max, fmt = '%#.2f'),
+                                 "\n    Mean: ",sprintf(Mean, fmt = '%#.2f'),
+                                 "\n    Median: ",sprintf(Median, fmt = '%#.2f'),
+                                 "\n    SD: ",sprintf(SD, fmt = '%#.2f'),
+                                 "\n    CV: ",sprintf(CV, fmt = '%#.2f')
+                  )
+    )
+  ) +
+  facet_wrap( ~ ano, ncol = 2)
+```
+
+
+
+# Pre-DClusterm: Getting centroid coordinates to build the grid for DetectClustersModel
+```{r}
+#Getting centroids using st_centroid (some points are outside of the polygon)
+# plot(st_geometry(RJ.map.sf), main="st_centroid()",  border = 'grey', axes = TRUE)
+# plot(st_geometry(st_centroid(RJ.map.sf)), pch = 3, col = 'red', add = TRUE)
+
+#Getting centroids using st_point_on_surface (some points are outside of the polygon)
+
+#plot(st_geometry(RJ.map.sf), main="st_point_on_surface()", border = 'grey', axes = TRUE)
+#plot(st_geometry(st_point_on_surface(RJ.map.sf)), pch = 3, col = 'red', add = TRUE)
+
+#It seems to be that our second option got all points inside each polygon
+cntrd = st_point_on_surface(RJ.map.sf)
+grid <- unlist(cntrd$geometry) %>%
+  matrix(byrow = T, ncol = 2) %>% data.frame()
+#head(grid)
+```
+
+
+#parallel processing (not in use)
+```{r}
+#Obtains the clusters with the maximum log-likelihood ratio or minimum DIC
+#require(future)
+#availableCores()
+#options(mc.cores = 6)
+```
+
+
+# DClusterem: Model-based Cluster Detection using INLA approach 
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+library("DClusterm")
+#library("xts") #DClusterm uses a function from xts, but it was not calling the pkg
+
+# Indicating of areas of possible cluster centres (not in use)
+#idxcl <- c(2) #thegrid = grid[idxcl,]
+```
+
+## year 2016
+```{r}
+cl_rj2016 <- DetectClustersModel(as(RJ.map.sf_2016, 'Spatial'),
+                                 thegrid = grid, 
+                                 fractpop = 0.15, alpha = 0.05, radius = Inf, step = NULL,
+                                 typeCluster = "S", R = NULL, model0 = mod1.m2016,
+                                 ClusterSizeContribution = "pop")
+cl_rj2016
+```
+
+
+## year 2017
+```{r}
+cl_rj2017 <- DetectClustersModel(as(RJ.map.sf_2017, 'Spatial'),
+                                 thegrid = grid, 
+                                 fractpop = 0.15, alpha = 0.05, radius = Inf, step = NULL,
+                                 typeCluster = "S", R = NULL, model0 = mod1.m2017,
+                                 ClusterSizeContribution = "pop")
+cl_rj2017
+```
+
+
+## year 2018
+```{r}
+cl_rj2018 <- DetectClustersModel(as(RJ.map.sf_2018, 'Spatial'),
+                                 thegrid = grid, 
+                                 fractpop = 0.15, alpha = 0.05, radius = Inf, step = NULL,
+                                 typeCluster = "S", R = NULL, model0 = mod1.m2018,
+                                 ClusterSizeContribution = "pop")
+cl_rj2018
+```
+
+
+## year 2019
+```{r}
+cl_rj2019 <- DetectClustersModel(as(RJ.map.sf_2019, 'Spatial'),
+                                 thegrid = grid, 
+                                 fractpop = 0.15, alpha = 0.05, radius = Inf, step = NULL,
+                                 typeCluster = "S", R = NULL, model0 = mod1.m2019,
+                                 ClusterSizeContribution = "pop")
+cl_rj2019
+```
+
+
+# Extra: Just an obvious barplot
+
+```{r}
+ggplot(RJ.map.sf, aes(x=IncidenciaCat)) +
+  geom_bar(aes(y = stat(count) / sum(count), fill=IncidenciaCat),) +
+  theme_minimal() + 
+  theme(plot.title = element_text(size = 14,face = "bold"),
+        text = element_text(size = 12),
+        axis.title = element_blank(),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.ticks.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none",
+        legend.title = element_text(face = "bold",size = 12),
+        legend.text = element_text(size = 12),
+        strip.text.x = element_text(face = "bold", size = 14)
+  ) +
+  scale_fill_manual(values = brewer.ylorrd(10),
+                    guide = guide_legend(title = "Incidence",reverse = TRUE)) +
+  coord_flip()
+```
